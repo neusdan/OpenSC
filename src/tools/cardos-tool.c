@@ -57,6 +57,7 @@ static const struct option options[] = {
 	{"card-driver", 1, NULL, 'c'},
 	{"wait",	0, NULL, 'w'},
 	{"verbose",	0, NULL, 'v'},
+    {"lifecycle", 0, NULL, 'l'},
 	{NULL, 0, NULL, 0}
 };
 
@@ -70,6 +71,7 @@ static const char *option_help[] = {
 	"Forces the use of driver <arg> [auto-detect]",
 	"Wait for a card to be inserted",
 	"Verbose operation. Use several times to enable debug output.",
+    "Change lifecycle.",
 };
 
 static sc_context_t *ctx = NULL;
@@ -449,6 +451,133 @@ static int cardos_info(void)
 	util_hex_dump_asc(stdout, apdu.resp, apdu.resplen, -1);
 
 	return 0;
+}
+
+static int cardos_change_lifecycle(void)
+{
+    sc_apdu_t apdu;
+    u8 rbuf[SC_MAX_APDU_BUFFER_SIZE];
+    int is_cardos5 = 0;
+    int r;
+
+    memset(&apdu, 0, sizeof(apdu));
+    apdu.cla = 0x00;
+    apdu.ins = 0xca;
+    apdu.p1 = 0x01;
+    apdu.p2 = 0x83;
+    apdu.resp = rbuf;
+    apdu.resplen = sizeof(rbuf);
+    apdu.lc = 0;
+    apdu.le = 256;
+    apdu.cse = SC_APDU_CASE_2_SHORT;
+
+    // Get current lifecycle:
+
+    r = sc_transmit_apdu(card, &apdu);
+    if (r) {
+        fprintf(stderr, "APDU transmit failed: %s\n",
+                sc_strerror(r));
+        return 1;
+    }
+    if (apdu.sw1 != 0x90 || apdu.sw2 != 0x00 || verbose) {
+        fprintf(stderr, "Received (SW1=0x%02X, SW2=0x%02X)%s\n",
+                apdu.sw1, apdu.sw2, apdu.resplen ? ":" : "");
+        if (apdu.resplen)
+            util_hex_dump_asc(stdout, apdu.resp, apdu.resplen, -1);
+        return 1;
+    }
+
+    printf("Current life cycle: ");
+    if (rbuf[0] == 0x34) {
+        printf("%d (manufacturing)\n", rbuf[0]);
+    } else if (rbuf[0] == 0x26) {
+        if (is_cardos5)
+            printf("%d (physinit)\n", rbuf[0]);
+        else
+            printf("%d (initialization)\n", rbuf[0]);
+    } else if (rbuf[0] == 0x23) {
+        printf("%d (physpers)\n", rbuf[0]);
+    } else if (rbuf[0] == 0x24) {
+        printf("%d (personalization)\n", rbuf[0]);
+    } else if (rbuf[0] == 0x20) {
+        printf("%d (administration)\n", rbuf[0]);
+    } else if (rbuf[0] == 0x10) {
+        printf("%d (operational)\n", rbuf[0]);
+    } else if (rbuf[0] == 0x29) {
+        printf("%d (erase in progress)\n", rbuf[0]);
+    } else if (rbuf[0] == 0x3F) {
+        printf("%d (death)\n", rbuf[0]);
+    } else {
+        printf("%d (unknown)\n", rbuf[0]);
+    }
+
+    // Change lifecycle to administration
+    if( rbuf[0] == 0x20 ) {
+        printf("card already in administration state.\n");
+        printf("aborting\n");
+        return 1;
+    }
+
+    printf("try to switch to administration state\n");
+
+    /* PHASE CONTORL 80 10 00 00 */
+
+    memset(&apdu, 0, sizeof(apdu));
+    apdu.cla = 0x80;
+    apdu.ins = 0x10;
+    apdu.p1 = 0x00;
+    apdu.p2 = 0x00;
+    apdu.resp = 00;
+    apdu.lc = 0;
+    apdu.le = 00;
+    apdu.cse = SC_APDU_CASE_1;
+    r = sc_transmit_apdu(card, &apdu);
+    if (r) {
+        fprintf(stderr, "APDU transmit failed: %s\n",
+                sc_strerror(r));
+        return 1;
+    }
+    if (apdu.sw1 != 0x90 || apdu.sw2 != 00 || verbose) {
+        fprintf(stderr, "Received (SW1=0x%02X, SW2=0x%02X)%s\n",
+                apdu.sw1, apdu.sw2, apdu.resplen ? ":" : "");
+        if (apdu.resplen)
+            util_hex_dump_asc(stdout, apdu.resp, apdu.resplen, -1);
+        return 1;
+    }
+
+    /* use GET DATA for lifecycle one more */
+
+    memset(&apdu, 0, sizeof(apdu));
+    apdu.cla = 0x00;
+    apdu.ins = 0xca;
+    apdu.p1 = 0x01;
+    apdu.p2 = 0x83;
+    apdu.resp = rbuf;
+    apdu.resplen = sizeof(rbuf);
+    apdu.lc = 0;
+    apdu.le = 256;
+    apdu.cse = SC_APDU_CASE_2_SHORT;
+    r = sc_transmit_apdu(card, &apdu);
+    if (r) {
+        fprintf(stderr, "APDU transmit failed: %s\n",
+                sc_strerror(r));
+        return 1;
+    }
+    if (apdu.sw1 != 0x90 || apdu.sw2 != 00 || verbose) {
+        fprintf(stderr, "Received (SW1=0x%02X, SW2=0x%02X)%s\n",
+                apdu.sw1, apdu.sw2, apdu.resplen ? ":" : "");
+        if (apdu.resplen)
+            util_hex_dump_asc(stdout, apdu.resp, apdu.resplen, -1);
+        return 1;
+    }
+    if (apdu.resp[0] != 0x20) {
+        printf("card not in administrative state, failed\n");
+        printf("aborting\n");
+        return 1;
+    }
+
+    printf("successfully changed state to administration state.\n");
+    return 0;
 }
 
 #ifdef ENABLE_OPENSSL
@@ -1155,6 +1284,7 @@ int main(int argc, char *const argv[])
 	int do_info = 0;
 	int do_format = 0;
 	int do_change_startkey = 0;
+    int do_lifecycle = 0;
 	int action_count = 0;
 	const char *opt_driver = NULL;
 	const char *opt_startkey = NULL;
@@ -1162,7 +1292,7 @@ int main(int argc, char *const argv[])
 	sc_context_param_t ctx_param;
 
 	while (1) {
-		c = getopt_long(argc, argv, "hifs:r:vdc:wS:", options,
+		c = getopt_long(argc, argv, "hilfs:r:vdc:wS:", options,
 				&long_optind);
 		if (c == -1)
 			break;
@@ -1196,9 +1326,14 @@ int main(int argc, char *const argv[])
 			opt_driver = optarg;
 			break;
 		case 'w':
-			opt_wait = 1;
-			break;
+                opt_wait = 1;
+                break;
+        case 'l':
+            do_lifecycle = 1;
+            action_count++;
+            break;
 		}
+
 	}
 
 	/* create sc_context_t object */
@@ -1249,6 +1384,12 @@ int main(int argc, char *const argv[])
 		}
 		action_count--;
 	}
+    if (do_lifecycle) {
+        if ((err = cardos_change_lifecycle())) {
+            goto end;
+        }
+        action_count--;
+    }
       end:
 	if (card) {
 		sc_unlock(card);
